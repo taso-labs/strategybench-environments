@@ -24,7 +24,8 @@ pub type Result<T> = std::result::Result<T, PokerError>;
 /// Heads-Up No-Limit Texas Hold'em match engine.
 ///
 /// Runs multiple hands between two players, tracking cumulative profit.
-/// Stacks reset each hand to `INITIAL_STACK`.
+/// Match-level stacks carry over between hands (tournament-style); a player is
+/// eliminated when busted, and the match ends on elimination or `MAX_HANDS`.
 #[derive(Debug, Clone)]
 pub struct PokerMatch {
     seed: u64,
