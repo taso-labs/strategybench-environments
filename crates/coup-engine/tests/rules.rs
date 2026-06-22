@@ -408,16 +408,14 @@ fn only_target_may_block_steal() {
     game.apply_action(&1, &CoupAction::Pass).unwrap();
     game.apply_action(&2, &CoupAction::Pass).unwrap();
 
+    // The target (player 1) is alive in this fixture, so the steal must land
+    // in a BlockWindow scoped to exactly the target — not resolve immediately.
     let state = game.state();
     match &state.current_phase {
         TurnPhase::BlockWindow { waiting_on, .. } => {
             assert_eq!(waiting_on, &vec![1], "only the target may block a steal");
         }
-        TurnPhase::ActionResolving => {
-            // acceptable: empty block window resolves immediately if
-            // target is eliminated in this fixture
-        }
-        other => panic!("expected BlockWindow, got {other:?}"),
+        other => panic!("expected BlockWindow {{ waiting_on: [1] }}, got {other:?}"),
     }
 
     // Third-party block attempt must be rejected.
