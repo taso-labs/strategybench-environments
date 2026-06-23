@@ -48,6 +48,11 @@ impl Environment for PokerEnvironment {
 
     fn state_for_player(&self, player_id: &str) -> Result<serde_json::Value> {
         let pid = Self::parse_player_id(player_id)?;
+        // Poker is heads-up: reject out-of-range ids before calling the engine,
+        // which indexes fixed-size `[_; 2]` arrays and would otherwise panic.
+        if !(0..2).contains(&pid) {
+            return Err(EnvironmentError::UnknownPlayer(player_id.to_string()));
+        }
         let view = self.game.state_for_player(pid);
         serde_json::to_value(&view).map_err(|e| EnvironmentError::SerializationError(e.to_string()))
     }
@@ -172,5 +177,28 @@ impl Environment for PokerEnvironment {
 
     fn player_ids(&self) -> Vec<String> {
         vec!["0".to_string(), "1".to_string()]
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression: an out-of-range player id must return UnknownPlayer rather
+    // than panic. The poker engine indexes fixed-size `[_; 2]` arrays, so a bad
+    // id (e.g. GET /matches/:id/state?player_id=999) previously aborted the
+    // request handler with an index-out-of-bounds panic.
+    #[test]
+    fn state_for_player_rejects_out_of_range_id() {
+        let env = PokerEnvironment::new(42).expect("env inits");
+        assert!(env.state_for_player("0").is_ok());
+        assert!(env.state_for_player("1").is_ok());
+        assert!(matches!(
+            env.state_for_player("999"),
+            Err(EnvironmentError::UnknownPlayer(_))
+        ));
+        assert!(matches!(
+            env.state_for_player("-1"),
+            Err(EnvironmentError::UnknownPlayer(_))
+        ));
     }
 }

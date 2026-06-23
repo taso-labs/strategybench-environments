@@ -24,7 +24,8 @@ pub type Result<T> = std::result::Result<T, PokerError>;
 /// Heads-Up No-Limit Texas Hold'em match engine.
 ///
 /// Runs multiple hands between two players, tracking cumulative profit.
-/// Stacks reset each hand to `INITIAL_STACK`.
+/// Match-level stacks carry over between hands (tournament-style); a player is
+/// eliminated when busted, and the match ends on elimination or `MAX_HANDS`.
 #[derive(Debug, Clone)]
 pub struct PokerMatch {
     seed: u64,
@@ -359,8 +360,11 @@ impl HandEngine {
         let max_raise_total = my_street_bet + my_stack;
 
         // Can raise if we have chips beyond the call amount and can meet min raise
-        // (or if all-in is less than min raise, we can still go all-in)
-        let can_raise = my_stack > call_amount && max_raise_total > opp_street_bet;
+        // (or if all-in is less than min raise, we can still go all-in). The
+        // `my_stack > 0` guard prevents a negative `call_amount` (an all-in
+        // over-bettor facing a smaller opposing street bet) from spuriously
+        // satisfying `my_stack > call_amount` and offering a phantom raise.
+        let can_raise = my_stack > 0 && my_stack > call_amount && max_raise_total > opp_street_bet;
 
         let effective_min_raise = if can_raise {
             min_raise_total.min(max_raise_total)
@@ -458,9 +462,20 @@ impl HandEngine {
     /// Check if the current betting round should advance to the next street.
     fn try_advance_street(&mut self) {
         let bets_equal = self.street_bets[0] == self.street_bets[1];
+        let both_all_in = self.stacks[0] == 0 && self.stacks[1] == 0;
         let someone_all_in = self.stacks[0] == 0 || self.stacks[1] == 0;
 
-        if bets_equal && self.street_actions >= 2 {
+        // Both players all-in: betting is over even when street bets are
+        // unequal. A short all-in (the shorter stack calling a larger shove)
+        // leaves the raiser's excess uncalled; finish_hand refunds it. Without
+        // this case, an asymmetric short all-in fell through to the
+        // action-bounce branch below and handed action to a 0-stack player,
+        // who was then offered a phantom raise, deadlocking the hand (and the
+        // match). Only reachable with carried-over tournament stacks.
+        if both_all_in {
+            self.deal_remaining_community();
+            self.finish_hand();
+        } else if bets_equal && self.street_actions >= 2 {
             if someone_all_in {
                 // Deal remaining community cards and go to showdown
                 self.deal_remaining_community();
@@ -616,5 +631,67 @@ impl HandEngine {
                 winning_hand,
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod hand_engine_tests {
+    use super::*;
+
+    // Regression for the asymmetric short all-in deadlock. Exercised here at the
+    // hand level (not via `PokerMatch`) because the bug needs *unequal* stacks,
+    // which only arise from carried-over tournament stacks — `PokerMatch::new`
+    // always deals equal `INITIAL_STACK`s and an all-in-or-call line from equal
+    // stacks busts a player in one hand without ever reaching the bug.
+    //
+    // With stacks [200, 50]: SB (button) shoves 200; BB can only call 50 all-in,
+    // leaving both players all-in with UNEQUAL street bets ([200, 50]). Before
+    // the fix, `try_advance_street` had no terminal case for that state and
+    // bounced action to the 0-stack SB, which `legal_actions` then offered a
+    // phantom raise — looping forever. The hand must instead finish, refunding
+    // the SB's uncalled 150 (matched pot = 2 * min(200, 50) = 100).
+    #[test]
+    fn asymmetric_short_all_in_finishes_without_deadlock() {
+        let mut hand = HandEngine::new(123, 0, [200, 50]).expect("hand inits");
+        let (sb, bb) = (0, 1); // button == SB in heads-up
+        assert_eq!(hand.active_player(), sb, "SB acts first preflop");
+
+        // SB shoves all-in.
+        let sb_max = hand.legal_actions().max_raise;
+        assert_eq!(sb_max, 200, "SB all-in is its full carried stack");
+        hand.apply_action(sb, &PokerAction::Raise { amount: sb_max })
+            .expect("SB shove is legal");
+
+        // BB short-calls all-in for less than the outstanding bet.
+        assert_eq!(hand.active_player(), bb);
+        assert!(
+            hand.legal_actions().can_call,
+            "short stack must be able to short-call an all-in"
+        );
+        hand.apply_action(bb, &PokerAction::Call)
+            .expect("short all-in call is legal");
+
+        // The key assertion: the hand terminates (it did not deadlock by
+        // handing action to a 0-stack player).
+        assert!(
+            hand.is_finished(),
+            "both players all-in must finish the hand, not bounce action"
+        );
+
+        // Chip conservation: zero-sum, and the SB's uncalled 150 is refunded
+        // (matched pot is exactly 2 * effective = 100), independent of winner.
+        let result = hand
+            .result()
+            .expect("result ok")
+            .expect("finished hand has a result");
+        assert_eq!(
+            result.profits[0] + result.profits[1],
+            0,
+            "per-hand profits must be zero-sum"
+        );
+        assert_eq!(
+            result.pot, 100,
+            "matched pot must be 2 * min(stacks); uncalled chips refunded"
+        );
     }
 }
